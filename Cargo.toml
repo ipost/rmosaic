@@ -1,0 +1,8 @@
+[package]
+name = "mosaic"
+version = "0.1.0"
+authors = ["ipost <post.isaac@gmail.com>"]
+
+[dependencies]
+image = "*"
+# TODO: parallelize stuff

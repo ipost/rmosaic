@@ -1,0 +1,5 @@
+*.swp
+*.swo
+target/release
+target/debug
+images

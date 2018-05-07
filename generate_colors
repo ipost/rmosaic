@@ -1,0 +1,3 @@
+#!/bin/bash
+mkdir -p images
+ruby png.rb white black red blue green yellow purple orange brown tan beige cyan grey pink
