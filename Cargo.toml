@@ -5,4 +5,9 @@ authors = ["ipost <post.isaac@gmail.com>"]
 
 [dependencies]
 image = "*"
+md5 = "*"
+serde = "*"
+serde_derive = "*"
+serde_json = "*"
+
 # TODO: parallelize stuff
