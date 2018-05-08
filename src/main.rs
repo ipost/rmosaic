@@ -1,27 +1,43 @@
 use std::collections::HashMap;
 use std::fs::read_dir;
-use std::fs::File;
-use std::io::Write;
 use std::path::PathBuf;
 
 mod lib;
 use lib::index::*;
 
+extern crate time;
+use time::PreciseTime;
+
+extern crate clap;
+use clap::{App, Arg};
+
 extern crate image;
-use image::{FilterType, GenericImage, ImageBuffer, SubImage};
+use image::{FilterType, GenericImage, ImageBuffer};
 extern crate md5;
 #[macro_use]
 extern crate serde_derive;
 extern crate serde_json;
 
+const DEFAULT_MAGNIFICATION: &'static str = "2";
+const DEFAULT_PIXEL_GROUP_SIZE: &'static str = "16";
+const INDEX_FILENAME: &'static str = ".mosaic_index";
+
 fn main() {
-    let source_image_path = "1.jpg";
-    let library_dir_path = "./images";
-    let out_file_path = "out.png";
-    // group pixels into NxN sections for replacement
-    let pixel_group_size = 10;
-    // the original image dimensions will increase by this factor
-    let magnification_factor = 1;
+    let params = get_parameters();
+    let source_image_path = params.value_of("INPUT").unwrap();
+    let library_dir_path = params.value_of("LIBRARY").unwrap();
+    let out_file_path = params.value_of("OUT_FILE").unwrap();
+
+    let pixel_group_size = params
+        .value_of("SIZE")
+        .unwrap_or("16")
+        .parse::<u32>()
+        .unwrap();
+    let magnification_factor = params
+        .value_of("MAGNIFICATION_FACTOR")
+        .unwrap_or(DEFAULT_MAGNIFICATION)
+        .parse::<u32>()
+        .unwrap();
 
     let source_image = image::open(source_image_path)
         .expect(&format!("Error reading source image {}", source_image_path));
@@ -29,7 +45,7 @@ fn main() {
     let closest_image = |(r, g, b): (u8, u8, u8)| -> &PathBuf {
         library
             .iter()
-            .min_by_key(|(pb, d)| {
+            .min_by_key(|(_pb, d)| {
                 ((((d.average.0 as i32).pow(2) - (r as i32).pow(2)).abs()
                     + ((d.average.1 as i32).pow(2) - (g as i32).pow(2)).abs()
                     + ((d.average.2 as i32).pow(2) - (b as i32).pow(2)).abs())
@@ -52,6 +68,7 @@ fn main() {
         source_image.width() * magnification_factor,
         source_image.height() * magnification_factor,
     );
+    let mut library_cache = HashMap::new();
     for x_offset in 0..(source_image.width() / pixel_group_size) {
         for y_offset in 0..(source_image.height() / pixel_group_size) {
             let subimg = source_image.sub_image(
@@ -62,19 +79,25 @@ fn main() {
             );
             let ac = average_color(subimg.to_image());
             let ci = closest_image(ac);
-            let source_image = image::open(ci)
-                .expect(&format!("Error reading image {}", source_image_path))
-                .resize_exact(
-                    pixel_group_size * magnification_factor,
-                    pixel_group_size * magnification_factor,
-                    FilterType::Nearest,
+            if !library_cache.contains_key(&ci) {
+                library_cache.insert(
+                    ci,
+                    image::open(ci)
+                        .expect(&format!("Error reading image {}", source_image_path))
+                        .resize_exact(
+                            pixel_group_size * magnification_factor,
+                            pixel_group_size * magnification_factor,
+                            FilterType::Nearest,
+                        ),
                 );
+            }
+            let source_image = library_cache.get(ci).unwrap();
             for x in 0..(pixel_group_size * magnification_factor) {
                 for y in 0..(pixel_group_size * magnification_factor) {
                     img.put_pixel(
                         (x_offset * pixel_group_size * magnification_factor) + x,
                         (y_offset * pixel_group_size * magnification_factor) + y,
-                        source_image.get_pixel(x, y)
+                        source_image.get_pixel(x, y),
                     );
                 }
             }
@@ -86,13 +109,14 @@ fn main() {
             // );
         }
     }
-    img.save(out_file_path);
+    img.save(out_file_path)
+        .expect("Failed to save result image");
 }
 
 fn load_library(dir: String) -> HashMap<PathBuf, IndexData> {
     let index_file_path = {
         let mut p = PathBuf::from(&dir);
-        p.push(".mosaic_index");
+        p.push(INDEX_FILENAME);
         p
     };
     let mut index: HashMap<PathBuf, IndexData> = if index_file_path.exists() {
@@ -108,6 +132,9 @@ fn load_library(dir: String) -> HashMap<PathBuf, IndexData> {
     println!("Indexing...");
     for file in read_dir(PathBuf::from(&dir)).unwrap() {
         let file_path = file.unwrap().path();
+        if file_path == index_file_path {
+            continue;
+        }
         let bytes = read_as_bytes(&file_path);
         let hash = format!("{:x}", md5::compute(&bytes));
         if index.contains_key(&file_path) && index.get(&file_path).unwrap().hash == hash {
@@ -134,22 +161,71 @@ fn load_library(dir: String) -> HashMap<PathBuf, IndexData> {
         }
     }
     write_index(&index_file_path, &index);
+    println!("Indexing complete");
     index
 }
 
 fn average_color(img: image::ImageBuffer<image::Rgb<u8>, std::vec::Vec<u8>>) -> (u8, u8, u8) {
     let (r, g, b) = img.enumerate_pixels()
-        .fold((0u32, 0u32, 0u32), |acc, pixel| {
+        .fold((0u64, 0u64, 0u64), |acc, pixel| {
             (
-                acc.0 + (pixel.2.data[0] as u32).pow(2),
-                acc.1 + (pixel.2.data[1] as u32).pow(2),
-                acc.2 + (pixel.2.data[2] as u32).pow(2),
+                acc.0 + (pixel.2.data[0] as u64).pow(2),
+                acc.1 + (pixel.2.data[1] as u64).pow(2),
+                acc.2 + (pixel.2.data[2] as u64).pow(2),
             )
         });
     let total_pixels = img.width() * img.height();
     (
-        ((r / total_pixels) as f64).sqrt() as u8,
-        ((g / total_pixels) as f64).sqrt() as u8,
-        ((b / total_pixels) as f64).sqrt() as u8,
+        ((r / total_pixels as u64) as f64).sqrt() as u8,
+        ((g / total_pixels as u64) as f64).sqrt() as u8,
+        ((b / total_pixels as u64) as f64).sqrt() as u8,
     )
+}
+
+fn get_parameters() -> clap::ArgMatches<'static> {
+    App::new("Rust photomosaic builder")
+        .version("0.1.0")
+        .author("Isaac Post <post.isaac@gmail.com>")
+        .about("Makes photomosaics")
+        .arg(
+            Arg::with_name("INPUT")
+            .help("Sets the input file to use")
+            .required(true)
+            .index(1),
+            )
+        .arg(
+            Arg::with_name("LIBRARY")
+            .help("The directory containing the images")
+            .required(true)
+            .index(2),
+            )
+        .arg(
+            Arg::with_name("OUT_FILE")
+            .help("The name of the output mosaic image.")
+            .required(true)
+            .index(3),
+            )
+        .arg(
+            Arg::with_name("v")
+            .short("v")
+            .multiple(true)
+            .help("Sets the level of verbosity"),
+            )
+        .arg(
+            Arg::with_name("SIZE")
+            .short("g")
+            .long("pixel-group-size")
+            .help(&format!("The size of the square regions, in pixels, which will be replaced in the source image. Defaults to {}", DEFAULT_PIXEL_GROUP_SIZE))
+            .takes_value(true)
+            .required(false),
+            )
+        .arg(
+            Arg::with_name("MAGNIFICATION_FACTOR")
+            .short("m")
+            .long("magnification")
+            .help(&format!("The factor by which the original image's dimensions are increased. Defaults to {}", DEFAULT_MAGNIFICATION))
+            .takes_value(true)
+            .required(false),
+            )
+        .get_matches()
 }

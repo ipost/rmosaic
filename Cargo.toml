@@ -5,6 +5,8 @@ authors = ["ipost <post.isaac@gmail.com>"]
 
 [dependencies]
 image = "*"
+clap = "*"
+time = "*"
 md5 = "*"
 serde = "*"
 serde_derive = "*"
@@ -16,5 +18,5 @@ path = "src/main.rs"
 
 # TODO: parallelize stuff
 # TODO: support for more average color points per image
-# TODO: gotta make em square
-# TODO: filtertype
+# TODO: different filtertypes?
+# TODO: verbosity flag
