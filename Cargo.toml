@@ -10,4 +10,8 @@ serde = "*"
 serde_derive = "*"
 serde_json = "*"
 
+[[bin]]
+name = "mosaic"
+path = "src/main.rs"
+
 # TODO: parallelize stuff
