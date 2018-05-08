@@ -15,3 +15,6 @@ name = "mosaic"
 path = "src/main.rs"
 
 # TODO: parallelize stuff
+# TODO: support for more average color points per image
+# TODO: gotta make em square
+# TODO: filtertype
