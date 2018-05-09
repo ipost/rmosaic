@@ -27,11 +27,16 @@ const DEFAULT_PIXEL_GROUP_SIZE: &'static str = "16";
 const INDEX_FILENAME: &'static str = ".mosaic_index";
 
 static mut PRINT_TIMING: bool = false;
-static mut VERBOSE: bool = false;
+static mut VERBOSITY: usize = 0;
 
 macro_rules! vprintln {
-    ($fmt:expr) => { if unsafe { VERBOSE } { println!($fmt) } };
-    ($fmt:expr, $($arg:tt)*) => { if unsafe { VERBOSE } { println!($fmt, $($arg)*) } };
+    ($fmt:expr) => { if unsafe { VERBOSITY >= 1 } { println!($fmt) } };
+    ($fmt:expr, $($arg:tt)*) => { if unsafe { VERBOSITY >= 1 } { println!($fmt, $($arg)*) } };
+}
+
+macro_rules! vvprintln {
+    ($fmt:expr) => { if unsafe { VERBOSITY >= 2 } { println!($fmt) } };
+    ($fmt:expr, $($arg:tt)*) => { if unsafe { VERBOSITY >= 2 } { println!($fmt, $($arg)*) } };
 }
 
 fn main() {
@@ -45,10 +50,9 @@ fn main() {
         }
     }
 
-    if params.is_present("verbose") {
-        unsafe {
-            VERBOSE = true;
-        }
+    let verbosity = params.occurrences_of("verbose") as usize;
+    unsafe {
+        VERBOSITY = verbosity;
     }
 
     let pixel_group_size = params
@@ -207,11 +211,12 @@ fn load_library(dir: String) -> HashMap<PathBuf, IndexData> {
         let bytes = read_as_bytes(&file_path);
         let hash = format!("{:x}", md5::compute(&bytes));
         if index.contains_key(&file_path) && index.get(&file_path).unwrap().hash == hash {
-            // println!(
-            //     "file {} has not changed",
-            //     file_path.to_string_lossy().to_string()
-            // );
+            vvprintln!(
+                "file {} has not changed",
+                file_path.to_string_lossy().to_string()
+            );
         } else {
+            vvprintln!("Indexing file {}", file_path.to_string_lossy().to_string());
             if let Ok(img) = image::load_from_memory(&bytes) {
                 let rgb = average_color(img.to_rgb().pixels().collect());
                 index.insert(
