@@ -93,6 +93,7 @@ fn main() {
         source_image.height() * magnification_factor,
     );
     let mut library_cache = HashMap::new();
+    let mut color_cache = HashMap::new();
     vprintln!("Building image...");
     let timer = start_timer();
     for x_offset in 0..(source_image.width() / pixel_group_size) {
@@ -104,7 +105,13 @@ fn main() {
                 pixel_group_size,
             );
             let ac = average_color(subimg.to_image());
-            let ci = closest_image(ac);
+            let ci = if color_cache.contains_key(&ac) {
+                color_cache.get(&ac).unwrap()
+            } else {
+                let ci = closest_image(ac);
+                color_cache.insert(ac, ci);
+                ci
+            };
             if !library_cache.contains_key(&ci) {
                 library_cache.insert(
                     ci,

@@ -22,4 +22,3 @@ path = "src/main.rs"
 # TODO: verbosity flag
 # TODO: progress bar
 # TODO: different tile shapes?
-# TODO: cache closest color matches?
