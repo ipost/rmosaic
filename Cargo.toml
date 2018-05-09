@@ -19,7 +19,6 @@ path = "src/main.rs"
 
 # TODO: support for more average color points per image
 # TODO: different filtertypes?
-# TODO: verbosity flag
 # TODO: progress bar
 # TODO: different tile shapes?
 # TODO: different color closeness algo?
