@@ -84,11 +84,11 @@ fn main() {
     let new_width = (width as f32 / pixel_group_size as f32).round() as u32 * pixel_group_size;
     let new_height = (height as f32 / pixel_group_size as f32).round() as u32 * pixel_group_size;
     vprintln!("New starting dimensions: {} x {}", new_width, new_height);
-    let mut source_image = source_image
+    let source_image: image::ImageBuffer<image::Rgb<u8>, std::vec::Vec<u8>> = source_image
         .resize_exact(new_width, new_height, FilterType::Nearest)
         .to_rgb();
 
-    let mut img = ImageBuffer::new(
+    let mut result_image: image::ImageBuffer<_, std::vec::Vec<_>> = ImageBuffer::new(
         source_image.width() * magnification_factor,
         source_image.height() * magnification_factor,
     );
@@ -96,55 +96,66 @@ fn main() {
     let mut color_cache = HashMap::new();
     vprintln!("Building image...");
     let timer = start_timer();
-    for x_offset in 0..(source_image.width() / pixel_group_size) {
-        for y_offset in 0..(source_image.height() / pixel_group_size) {
-            let subimg = source_image.sub_image(
-                x_offset * pixel_group_size,
-                y_offset * pixel_group_size,
-                pixel_group_size,
-                pixel_group_size,
+    let regions = {
+        let mut regions = Vec::with_capacity(
+            (source_image.width() * source_image.height() / (pixel_group_size.pow(2))) as usize,
+        );
+        for x_region in 0..(source_image.width() / pixel_group_size) {
+            for y_region in 0..(source_image.height() / pixel_group_size) {
+                regions.push((x_region, y_region));
+            }
+        }
+        regions
+    };
+    for (x_region, y_region) in regions {
+        let region_pixels = sub_image_pixels(
+            &source_image,
+            x_region * pixel_group_size,
+            y_region * pixel_group_size,
+            pixel_group_size,
+            pixel_group_size,
+        );
+        let average_color = average_color(region_pixels.iter().collect());
+        let closest_image_path = if color_cache.contains_key(&average_color) {
+            color_cache.get(&average_color).unwrap()
+        } else {
+            let closest_image_path = closest_image(average_color);
+            color_cache.insert(average_color, closest_image_path);
+            closest_image_path
+        };
+        if !library_cache.contains_key(&closest_image_path) {
+            library_cache.insert(
+                closest_image_path,
+                image::open(closest_image_path)
+                    .expect(&format!("Error reading image {}", source_image_path))
+                    .resize_exact(
+                        pixel_group_size * magnification_factor,
+                        pixel_group_size * magnification_factor,
+                        FilterType::Nearest,
+                    ),
             );
-            let ac = average_color(subimg.to_image());
-            let ci = if color_cache.contains_key(&ac) {
-                color_cache.get(&ac).unwrap()
-            } else {
-                let ci = closest_image(ac);
-                color_cache.insert(ac, ci);
-                ci
-            };
-            if !library_cache.contains_key(&ci) {
-                library_cache.insert(
-                    ci,
-                    image::open(ci)
-                        .expect(&format!("Error reading image {}", source_image_path))
-                        .resize_exact(
-                            pixel_group_size * magnification_factor,
-                            pixel_group_size * magnification_factor,
-                            FilterType::Nearest,
-                        ),
+        }
+        let source_image = library_cache.get(closest_image_path).unwrap();
+        for x in 0..(pixel_group_size * magnification_factor) {
+            for y in 0..(pixel_group_size * magnification_factor) {
+                result_image.put_pixel(
+                    (x_region * pixel_group_size * magnification_factor) + x,
+                    (y_region * pixel_group_size * magnification_factor) + y,
+                    source_image.get_pixel(x, y),
                 );
             }
-            let source_image = library_cache.get(ci).unwrap();
-            for x in 0..(pixel_group_size * magnification_factor) {
-                for y in 0..(pixel_group_size * magnification_factor) {
-                    img.put_pixel(
-                        (x_offset * pixel_group_size * magnification_factor) + x,
-                        (y_offset * pixel_group_size * magnification_factor) + y,
-                        source_image.get_pixel(x, y),
-                    );
-                }
-            }
-            // println!(
-            //     "closest color for {} {}: {}",
-            //     x_offset * pixel_group_size,
-            //     y_offset * pixel_group_size,
-            //     ci.to_string_lossy().to_string()
-            // );
         }
+        // println!(
+        //     "closest color for {} {}: {}",
+        //     x_region * pixel_group_size,
+        //     y_region * pixel_group_size,
+        //     ci.to_string_lossy().to_string()
+        // );
     }
     stop_timer(timer, "Image build time: ");
     let timer = start_timer();
-    img.save(out_file_path)
+    result_image
+        .save(out_file_path)
         .expect("Failed to save result image");
     stop_timer(timer, "Image write time: ");
     println!("Wrote {}", out_file_path);
@@ -182,7 +193,7 @@ fn load_library(dir: String) -> HashMap<PathBuf, IndexData> {
             // );
         } else {
             if let Ok(img) = image::load_from_memory(&bytes) {
-                let rgb = average_color(img.to_rgb());
+                let rgb = average_color(img.to_rgb().pixels().collect());
                 index.insert(
                     file_path,
                     IndexData {
@@ -204,16 +215,15 @@ fn load_library(dir: String) -> HashMap<PathBuf, IndexData> {
     index
 }
 
-fn average_color(img: image::ImageBuffer<image::Rgb<u8>, std::vec::Vec<u8>>) -> (u8, u8, u8) {
-    let (r, g, b) = img.enumerate_pixels()
-        .fold((0u64, 0u64, 0u64), |acc, pixel| {
-            (
-                acc.0 + (pixel.2.data[0] as u64).pow(2),
-                acc.1 + (pixel.2.data[1] as u64).pow(2),
-                acc.2 + (pixel.2.data[2] as u64).pow(2),
-            )
-        });
-    let total_pixels = img.width() * img.height();
+fn average_color(pixels: Vec<&image::Rgb<u8>>) -> (u8, u8, u8) {
+    let total_pixels = pixels.len();
+    let (r, g, b) = pixels.into_iter().fold((0u64, 0u64, 0u64), |acc, pixel| {
+        (
+            acc.0 + (pixel.data[0] as u64).pow(2),
+            acc.1 + (pixel.data[1] as u64).pow(2),
+            acc.2 + (pixel.data[2] as u64).pow(2),
+        )
+    });
     (
         ((r / total_pixels as u64) as f64).sqrt() as u8,
         ((g / total_pixels as u64) as f64).sqrt() as u8,
@@ -285,4 +295,20 @@ fn stop_timer(timer: time::PreciseTime, message: &str) {
         let duration = timer.to(PreciseTime::now()).num_milliseconds();
         println!("{}{}ms", message, duration);
     }
+}
+
+fn sub_image_pixels(
+    img: &image::ImageBuffer<image::Rgb<u8>, std::vec::Vec<u8>>,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Vec<image::Rgb<u8>> {
+    let mut rgbs = Vec::with_capacity((width * height) as usize);
+    for x_new in 0..width {
+        for y_new in 0..height {
+            rgbs.push(img[(x + x_new, y + y_new)]);
+        }
+    }
+    rgbs
 }
