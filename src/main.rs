@@ -57,14 +57,14 @@ fn main() {
 
     let pixel_group_size = params
         .value_of("SIZE")
-        .unwrap_or("16")
+        .unwrap_or(DEFAULT_PIXEL_GROUP_SIZE)
         .parse::<u32>()
-        .unwrap();
+        .expect("Invalid value for SIZE");
     let magnification_factor = params
         .value_of("MAGNIFICATION_FACTOR")
         .unwrap_or(DEFAULT_MAGNIFICATION)
         .parse::<u32>()
-        .unwrap();
+        .expect("Invalid value for MAGNIFICATION_FACTOR");
 
     vprintln!("Using magnification: {}", magnification_factor);
     vprintln!("Using pixel group size: {}", pixel_group_size);
@@ -191,7 +191,8 @@ fn load_library(dir: String) -> HashMap<PathBuf, IndexData> {
         p.push(INDEX_FILENAME);
         p
     };
-    let index: Mutex<HashMap<PathBuf, IndexData>> = Mutex::new(if index_file_path.exists() {
+    let index: Mutex<HashMap<PathBuf, IndexData>> = Mutex::new(
+        if index_file_path.exists() {
         vprintln!("Existing index found");
         read_index(&index_file_path)
     } else {
@@ -199,12 +200,13 @@ fn load_library(dir: String) -> HashMap<PathBuf, IndexData> {
         HashMap::new()
     }.into_iter() // filter out entries whose backing file is gone
             .filter(|(path, _data)| path.exists())
-            .collect());
+            .collect(),
+    );
 
     vprintln!("Indexing...");
     let timer = start_timer();
     let dir_iter = read_dir(PathBuf::from(&dir))
-        .unwrap()
+        .expect("Unable to read image library dir")
         .collect::<Vec<std::result::Result<std::fs::DirEntry, std::io::Error>>>()
         .into_par_iter();
     dir_iter.for_each(|file| {
@@ -303,7 +305,7 @@ fn get_parameters() -> clap::ArgMatches<'static> {
             Arg::with_name("SIZE")
             .short("g")
             .long("pixel-group-size")
-            .help(&format!("The size of the square regions, in pixels, which will be replaced in the source image. Defaults to {}", DEFAULT_PIXEL_GROUP_SIZE))
+            .help(&format!("The integer size of the square regions, in pixels, which will be replaced in the source image. Defaults to {}", DEFAULT_PIXEL_GROUP_SIZE))
             .takes_value(true)
             .required(false),
             )
@@ -311,7 +313,7 @@ fn get_parameters() -> clap::ArgMatches<'static> {
             Arg::with_name("MAGNIFICATION_FACTOR")
             .short("m")
             .long("magnification")
-            .help(&format!("The factor by which the original image's dimensions are increased. Defaults to {}", DEFAULT_MAGNIFICATION))
+            .help(&format!("The integer factor by which the original image's dimensions are increased. Defaults to {}", DEFAULT_MAGNIFICATION))
             .takes_value(true)
             .required(false),
             )
