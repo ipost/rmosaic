@@ -22,11 +22,30 @@ const DEFAULT_MAGNIFICATION: &'static str = "2";
 const DEFAULT_PIXEL_GROUP_SIZE: &'static str = "16";
 const INDEX_FILENAME: &'static str = ".mosaic_index";
 
+static mut PRINT_TIMING: bool = false;
+static mut VERBOSE: bool = false;
+
+macro_rules! vprintln {
+    ($fmt:expr) => { if unsafe { VERBOSE } { println!($fmt) } };
+    ($fmt:expr, $($arg:tt)*) => { if unsafe { VERBOSE } { println!($fmt, $($arg)*) } };
+}
+
 fn main() {
     let params = get_parameters();
     let source_image_path = params.value_of("INPUT").unwrap();
     let library_dir_path = params.value_of("LIBRARY").unwrap();
     let out_file_path = params.value_of("OUT_FILE").unwrap();
+    if params.is_present("print-timings") {
+        unsafe {
+            PRINT_TIMING = true;
+        }
+    }
+
+    if params.is_present("verbose") {
+        unsafe {
+            VERBOSE = true;
+        }
+    }
 
     let pixel_group_size = params
         .value_of("SIZE")
@@ -38,6 +57,11 @@ fn main() {
         .unwrap_or(DEFAULT_MAGNIFICATION)
         .parse::<u32>()
         .unwrap();
+
+    vprintln!("Using magnification: {}", magnification_factor);
+    vprintln!("Using pixel group size: {}", pixel_group_size);
+    vprintln!("Recreating: {}", source_image_path);
+    vprintln!("Using library at: {}", library_dir_path);
 
     let source_image = image::open(source_image_path)
         .expect(&format!("Error reading source image {}", source_image_path));
@@ -59,7 +83,7 @@ fn main() {
     let (width, height) = source_image.dimensions();
     let new_width = (width as f32 / pixel_group_size as f32).round() as u32 * pixel_group_size;
     let new_height = (height as f32 / pixel_group_size as f32).round() as u32 * pixel_group_size;
-    println!("New starting dimensions: {} x {}", new_width, new_height);
+    vprintln!("New starting dimensions: {} x {}", new_width, new_height);
     let mut source_image = source_image
         .resize_exact(new_width, new_height, FilterType::Nearest)
         .to_rgb();
@@ -69,6 +93,8 @@ fn main() {
         source_image.height() * magnification_factor,
     );
     let mut library_cache = HashMap::new();
+    vprintln!("Building image...");
+    let timer = start_timer();
     for x_offset in 0..(source_image.width() / pixel_group_size) {
         for y_offset in 0..(source_image.height() / pixel_group_size) {
             let subimg = source_image.sub_image(
@@ -109,8 +135,12 @@ fn main() {
             // );
         }
     }
+    stop_timer(timer, "Image build time: ");
+    let timer = start_timer();
     img.save(out_file_path)
         .expect("Failed to save result image");
+    stop_timer(timer, "Image write time: ");
+    println!("Wrote {}", out_file_path);
 }
 
 fn load_library(dir: String) -> HashMap<PathBuf, IndexData> {
@@ -120,16 +150,17 @@ fn load_library(dir: String) -> HashMap<PathBuf, IndexData> {
         p
     };
     let mut index: HashMap<PathBuf, IndexData> = if index_file_path.exists() {
-        println!("Existing index found");
+        vprintln!("Existing index found");
         read_index(&index_file_path)
     } else {
-        println!("No index found");
+        vprintln!("No index found");
         HashMap::new()
     }.into_iter() // filter out entries whose backing file is gone
             .filter(|(path, _data)| path.exists())
             .collect();
 
-    println!("Indexing...");
+    vprintln!("Indexing...");
+    let timer = start_timer();
     for file in read_dir(PathBuf::from(&dir)).unwrap() {
         let file_path = file.unwrap().path();
         if file_path == index_file_path {
@@ -153,7 +184,7 @@ fn load_library(dir: String) -> HashMap<PathBuf, IndexData> {
                     },
                 );
             } else {
-                println!(
+                vprintln!(
                     "Skipping unsupported file {}",
                     file_path.to_string_lossy().to_string()
                 );
@@ -162,6 +193,7 @@ fn load_library(dir: String) -> HashMap<PathBuf, IndexData> {
     }
     write_index(&index_file_path, &index);
     println!("Indexing complete");
+    stop_timer(timer, "Indexing time: ");
     index
 }
 
@@ -189,27 +221,34 @@ fn get_parameters() -> clap::ArgMatches<'static> {
         .about("Makes photomosaics")
         .arg(
             Arg::with_name("INPUT")
-            .help("Sets the input file to use")
+            .help("Sets the input file which will be recreated as a mosaic")
             .required(true)
             .index(1),
             )
         .arg(
             Arg::with_name("LIBRARY")
-            .help("The directory containing the images")
+            .help("The directory containing the images to be used as mosaic tiles")
             .required(true)
             .index(2),
             )
         .arg(
             Arg::with_name("OUT_FILE")
-            .help("The name of the output mosaic image.")
+            .help("The name of the output mosaic image")
             .required(true)
             .index(3),
             )
         .arg(
-            Arg::with_name("v")
+            Arg::with_name("verbose")
             .short("v")
+            .long("verbose")
             .multiple(true)
             .help("Sets the level of verbosity"),
+            )
+        .arg(
+            Arg::with_name("print-timings")
+            .short("t")
+            .long("print-timings")
+            .help("Print timings"),
             )
         .arg(
             Arg::with_name("SIZE")
@@ -228,4 +267,15 @@ fn get_parameters() -> clap::ArgMatches<'static> {
             .required(false),
             )
         .get_matches()
+}
+
+fn start_timer() -> time::PreciseTime {
+    PreciseTime::now()
+}
+
+fn stop_timer(timer: time::PreciseTime, message: &str) {
+    if unsafe { PRINT_TIMING } {
+        let duration = timer.to(PreciseTime::now()).num_milliseconds();
+        println!("{}{}ms", message, duration);
+    }
 }
