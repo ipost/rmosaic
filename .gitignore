@@ -3,3 +3,4 @@
 target/release
 target/debug
 images
+*.mosaic_index
