@@ -1,5 +1,5 @@
 [package]
-name = "mosaic"
+name = "rmosaic"
 version = "0.1.0"
 authors = ["ipost <post.isaac@gmail.com>"]
 
@@ -14,7 +14,7 @@ serde_derive = "*"
 serde_json = "*"
 
 [[bin]]
-name = "mosaic"
+name = "rmosaic"
 path = "src/main.rs"
 
 # TODO: support for more average color points per image

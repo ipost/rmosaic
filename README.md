@@ -1,1 +1,1 @@
-# mosaic-rs
+# rmosaic
