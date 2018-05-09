@@ -17,7 +17,6 @@ serde_json = "*"
 name = "mosaic"
 path = "src/main.rs"
 
-# TODO: parallelize stuff
 # TODO: support for more average color points per image
 # TODO: different filtertypes?
 # TODO: verbosity flag

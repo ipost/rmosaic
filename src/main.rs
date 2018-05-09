@@ -191,7 +191,7 @@ fn load_library(dir: String) -> HashMap<PathBuf, IndexData> {
         p.push(INDEX_FILENAME);
         p
     };
-    let mut index: HashMap<PathBuf, IndexData> = if index_file_path.exists() {
+    let index: Mutex<HashMap<PathBuf, IndexData>> = Mutex::new(if index_file_path.exists() {
         vprintln!("Existing index found");
         read_index(&index_file_path)
     } else {
@@ -199,27 +199,33 @@ fn load_library(dir: String) -> HashMap<PathBuf, IndexData> {
         HashMap::new()
     }.into_iter() // filter out entries whose backing file is gone
             .filter(|(path, _data)| path.exists())
-            .collect();
+            .collect());
 
     vprintln!("Indexing...");
     let timer = start_timer();
-    for file in read_dir(PathBuf::from(&dir)).unwrap() {
+    let dir_iter = read_dir(PathBuf::from(&dir))
+        .unwrap()
+        .collect::<Vec<std::result::Result<std::fs::DirEntry, std::io::Error>>>()
+        .into_par_iter();
+    dir_iter.for_each(|file| {
         let file_path = file.unwrap().path();
         if file_path == index_file_path {
-            continue;
+            return;
         }
         let bytes = read_as_bytes(&file_path);
         let hash = format!("{:x}", md5::compute(&bytes));
-        if index.contains_key(&file_path) && index.get(&file_path).unwrap().hash == hash {
+        let l_index = index.lock().unwrap();
+        if l_index.contains_key(&file_path) && l_index.get(&file_path).unwrap().hash == hash {
             vvprintln!(
                 "file {} has not changed",
                 file_path.to_string_lossy().to_string()
             );
         } else {
+            drop(l_index);
             vvprintln!("Indexing file {}", file_path.to_string_lossy().to_string());
             if let Ok(img) = image::load_from_memory(&bytes) {
                 let rgb = average_color(img.to_rgb().pixels().collect());
-                index.insert(
+                index.lock().unwrap().insert(
                     file_path,
                     IndexData {
                         hash: hash,
@@ -233,7 +239,8 @@ fn load_library(dir: String) -> HashMap<PathBuf, IndexData> {
                 );
             }
         }
-    }
+    });
+    let index = index.into_inner().unwrap();
     write_index(&index_file_path, &index);
     println!("Indexing complete");
     stop_timer(timer, "Indexing time: ");
