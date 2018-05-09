@@ -8,6 +8,10 @@ use lib::index::*;
 extern crate time;
 use time::PreciseTime;
 
+use std::sync::Mutex;
+extern crate rayon;
+use rayon::prelude::*;
+
 extern crate clap;
 use clap::{App, Arg};
 
@@ -88,12 +92,12 @@ fn main() {
         .resize_exact(new_width, new_height, FilterType::Nearest)
         .to_rgb();
 
-    let mut result_image: image::ImageBuffer<_, std::vec::Vec<_>> = ImageBuffer::new(
+    let result_image = Mutex::new(ImageBuffer::new(
         source_image.width() * magnification_factor,
         source_image.height() * magnification_factor,
-    );
-    let mut library_cache = HashMap::new();
-    let mut color_cache = HashMap::new();
+    ));
+    let library_cache: Mutex<HashMap<&PathBuf, image::DynamicImage>> = Mutex::new(HashMap::new());
+    let color_cache = Mutex::new(HashMap::new());
     vprintln!("Building image...");
     let timer = start_timer();
     let regions = {
@@ -107,7 +111,7 @@ fn main() {
         }
         regions
     };
-    for (x_region, y_region) in regions {
+    regions.par_iter().for_each(|(x_region, y_region)| {
         let region_pixels = sub_image_pixels(
             &source_image,
             x_region * pixel_group_size,
@@ -116,45 +120,61 @@ fn main() {
             pixel_group_size,
         );
         let average_color = average_color(region_pixels.iter().collect());
-        let closest_image_path = if color_cache.contains_key(&average_color) {
-            color_cache.get(&average_color).unwrap()
-        } else {
-            let closest_image_path = closest_image(average_color);
-            color_cache.insert(average_color, closest_image_path);
-            closest_image_path
+
+        let closest_image_path = {
+            let mut l_color_cache = color_cache.lock().unwrap();
+            if l_color_cache.contains_key(&average_color) {
+                l_color_cache.get(&average_color).unwrap()
+            } else {
+                drop(l_color_cache);
+                let closest_image_path = closest_image(average_color);
+                color_cache
+                    .lock()
+                    .unwrap()
+                    .insert(average_color, closest_image_path);
+                closest_image_path
+            }
         };
-        if !library_cache.contains_key(&closest_image_path) {
-            library_cache.insert(
-                closest_image_path,
-                image::open(closest_image_path)
+
+        let source_image: image::DynamicImage = {
+            let mut l_library_cache = library_cache.lock().unwrap();
+            if l_library_cache.contains_key(&closest_image_path) {
+                l_library_cache.get(closest_image_path).unwrap().clone()
+            } else {
+                drop(l_library_cache);
+                let i = image::open(closest_image_path)
                     .expect(&format!("Error reading image {}", source_image_path))
                     .resize_exact(
                         pixel_group_size * magnification_factor,
                         pixel_group_size * magnification_factor,
                         FilterType::Nearest,
-                    ),
-            );
-        }
-        let source_image = library_cache.get(closest_image_path).unwrap();
+                    );
+                let i_clone = i.clone();
+                library_cache.lock().unwrap().insert(closest_image_path, i);
+                i_clone
+            }
+        };
+
+        let mut pixels = vec![];
         for x in 0..(pixel_group_size * magnification_factor) {
             for y in 0..(pixel_group_size * magnification_factor) {
-                result_image.put_pixel(
+                pixels.push((
                     (x_region * pixel_group_size * magnification_factor) + x,
                     (y_region * pixel_group_size * magnification_factor) + y,
                     source_image.get_pixel(x, y),
-                );
+                ));
             }
         }
-        // println!(
-        //     "closest color for {} {}: {}",
-        //     x_region * pixel_group_size,
-        //     y_region * pixel_group_size,
-        //     ci.to_string_lossy().to_string()
-        // );
-    }
+        let mut result_image = result_image.lock().unwrap();
+        for (x, y, p) in pixels {
+            result_image.put_pixel(x, y, p);
+        }
+    });
     stop_timer(timer, "Image build time: ");
     let timer = start_timer();
     result_image
+        .lock()
+        .unwrap()
         .save(out_file_path)
         .expect("Failed to save result image");
     stop_timer(timer, "Image write time: ");
