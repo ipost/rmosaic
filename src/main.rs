@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs::read_dir;
+use std::io::*;
 use std::path::PathBuf;
 
 mod lib;
@@ -24,19 +25,22 @@ extern crate serde_json;
 
 const DEFAULT_MAGNIFICATION: &'static str = "2";
 const DEFAULT_PIXEL_GROUP_SIZE: &'static str = "16";
+const DEFAULT_THREADS: &'static str = "2";
 const INDEX_FILENAME: &'static str = ".mosaic_index";
+const PROGRESS_SECTIONS: usize = 20;
 
 static mut PRINT_TIMING: bool = false;
+static mut COLOR_CACHING: bool = false;
 static mut VERBOSITY: usize = 0;
 
 macro_rules! vprintln {
-    ($fmt:expr) => { if unsafe { VERBOSITY >= 1 } { println!($fmt) } };
-    ($fmt:expr, $($arg:tt)*) => { if unsafe { VERBOSITY >= 1 } { println!($fmt, $($arg)*) } };
+    ($fmt:expr) => { if verbosity(1) { println!($fmt) } };
+    ($fmt:expr, $($arg:tt)*) => { if verbosity(1) { println!($fmt, $($arg)*) } };
 }
 
 macro_rules! vvprintln {
-    ($fmt:expr) => { if unsafe { VERBOSITY >= 2 } { println!($fmt) } };
-    ($fmt:expr, $($arg:tt)*) => { if unsafe { VERBOSITY >= 2 } { println!($fmt, $($arg)*) } };
+    ($fmt:expr) => { if verbosity(2) { println!($fmt) } };
+    ($fmt:expr, $($arg:tt)*) => { if verbosity(2) { println!($fmt, $($arg)*) } };
 }
 
 fn main() {
@@ -49,12 +53,15 @@ fn main() {
             PRINT_TIMING = true;
         }
     }
-
-    let verbosity = params.occurrences_of("verbose") as usize;
-    unsafe {
-        VERBOSITY = verbosity;
+    if params.is_present("color-caching") {
+        unsafe {
+            COLOR_CACHING = true;
+        }
     }
-
+    let verbosity_level = params.occurrences_of("verbose") as usize;
+    unsafe {
+        VERBOSITY = verbosity_level;
+    }
     let pixel_group_size = params
         .value_of("SIZE")
         .unwrap_or(DEFAULT_PIXEL_GROUP_SIZE)
@@ -65,11 +72,30 @@ fn main() {
         .unwrap_or(DEFAULT_MAGNIFICATION)
         .parse::<u32>()
         .expect("Invalid value for MAGNIFICATION_FACTOR");
+    let threads = params
+        .value_of("THREADS")
+        .unwrap_or(DEFAULT_THREADS)
+        .parse::<usize>()
+        .expect("Invalid value for THREADS");
 
     vprintln!("Using magnification: {}", magnification_factor);
     vprintln!("Using pixel group size: {}", pixel_group_size);
     vprintln!("Recreating: {}", source_image_path);
     vprintln!("Using library at: {}", library_dir_path);
+    vprintln!("Running with {} threads", threads);
+    vprintln!(
+        "Color caching is {}",
+        if color_caching() {
+            "ENABLED"
+        } else {
+            "DISABLED"
+        }
+    );
+
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build_global()
+        .unwrap();
 
     let source_image = image::open(source_image_path)
         .expect(&format!("Error reading source image {}", source_image_path));
@@ -91,7 +117,7 @@ fn main() {
     let (width, height) = source_image.dimensions();
     let new_width = (width as f32 / pixel_group_size as f32).round() as u32 * pixel_group_size;
     let new_height = (height as f32 / pixel_group_size as f32).round() as u32 * pixel_group_size;
-    vprintln!("New starting dimensions: {} x {}", new_width, new_height);
+    vvprintln!("New starting dimensions: {} x {}", new_width, new_height);
     let source_image: image::ImageBuffer<image::Rgb<u8>, std::vec::Vec<u8>> = source_image
         .resize_exact(new_width, new_height, FilterType::Nearest)
         .to_rgb();
@@ -115,6 +141,10 @@ fn main() {
         }
         regions
     };
+    let total_regions = regions.len();
+    let progress_increment = total_regions / PROGRESS_SECTIONS;
+    vvprintln!("{} regions", total_regions);
+    let progress = Mutex::new(0);
     regions.par_iter().for_each(|(x_region, y_region)| {
         let region_pixels = sub_image_pixels(
             &source_image,
@@ -125,7 +155,7 @@ fn main() {
         );
         let average_color = average_color(region_pixels.iter().collect());
 
-        let closest_image_path = {
+        let closest_image_path = if color_caching() {
             let mut l_color_cache = color_cache.lock().unwrap();
             if l_color_cache.contains_key(&average_color) {
                 l_color_cache.get(&average_color).unwrap()
@@ -138,6 +168,8 @@ fn main() {
                     .insert(average_color, closest_image_path);
                 closest_image_path
             }
+        } else {
+            closest_image(average_color)
         };
 
         let source_image: image::DynamicImage = {
@@ -163,17 +195,31 @@ fn main() {
         for x in 0..(pixel_group_size * magnification_factor) {
             for y in 0..(pixel_group_size * magnification_factor) {
                 pixels.push((
-                    (x_region * pixel_group_size * magnification_factor) + x,
-                    (y_region * pixel_group_size * magnification_factor) + y,
-                    source_image.get_pixel(x, y),
-                ));
+                        (x_region * pixel_group_size * magnification_factor) + x,
+                        (y_region * pixel_group_size * magnification_factor) + y,
+                        source_image.get_pixel(x, y),
+                        ));
             }
         }
         let mut result_image = result_image.lock().unwrap();
         for (x, y, p) in pixels {
             result_image.put_pixel(x, y, p);
         }
+        let mut p = progress.lock().unwrap();
+        *p += 1;
+        if *p % progress_increment == 0 {
+            let bar = *p / progress_increment;
+            print!(
+                "{}[{}{}] {}%",
+                "\x08".repeat(PROGRESS_SECTIONS + 9),
+                "=".repeat(bar),
+                " ".repeat(PROGRESS_SECTIONS - bar),
+                100 * *p / total_regions
+                );
+            std::io::stdout().flush().expect("Something went wrong while writing to STDOUT");
+        }
     });
+    println!("");
     stop_timer(timer, "Image build time: ");
     let timer = start_timer();
     result_image
@@ -289,6 +335,12 @@ fn get_parameters() -> clap::ArgMatches<'static> {
             .index(3),
             )
         .arg(
+            Arg::with_name("color-caching")
+            .short("c")
+            .long("color-caching")
+            .help("Enables caching of closest-color matches. May improve performance if the input image has many identical colors repeated and/or you have a large image library."),
+            )
+        .arg(
             Arg::with_name("verbose")
             .short("v")
             .long("verbose")
@@ -314,6 +366,13 @@ fn get_parameters() -> clap::ArgMatches<'static> {
             .short("m")
             .long("magnification")
             .help(&format!("The integer factor by which the original image's dimensions are increased. Defaults to {}", DEFAULT_MAGNIFICATION))
+            .takes_value(true)
+            .required(false),
+            )
+        .arg(
+            Arg::with_name("THREADS")
+            .long("threads")
+            .help(&format!("The number of threads used. Defaults to {}", DEFAULT_THREADS))
             .takes_value(true)
             .required(false),
             )
@@ -345,4 +404,12 @@ fn sub_image_pixels(
         }
     }
     rgbs
+}
+
+fn color_caching() -> bool {
+    unsafe { COLOR_CACHING }
+}
+
+fn verbosity(v_level: usize) -> bool {
+    unsafe { VERBOSITY >= v_level }
 }
