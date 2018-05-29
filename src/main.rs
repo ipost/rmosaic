@@ -5,16 +5,13 @@ use std::path::PathBuf;
 
 mod lib;
 use lib::index::*;
-
-extern crate time;
-use time::PreciseTime;
+use lib::params::{color_caching, parameters, set_color_caching, set_print_timings, set_verbosity,
+                  verbosity};
+use lib::timing::*;
 
 use std::sync::Mutex;
 extern crate rayon;
 use rayon::prelude::*;
-
-extern crate clap;
-use clap::{App, Arg};
 
 extern crate image;
 use image::{FilterType, GenericImage, ImageBuffer};
@@ -23,15 +20,8 @@ extern crate md5;
 extern crate serde_derive;
 extern crate serde_json;
 
-const DEFAULT_MAGNIFICATION: &'static str = "2";
-const DEFAULT_PIXEL_GROUP_SIZE: &'static str = "16";
-const DEFAULT_THREADS: &'static str = "2";
 const INDEX_FILENAME: &'static str = ".mosaic_index";
 const PROGRESS_SECTIONS: usize = 20;
-
-static mut PRINT_TIMING: bool = false;
-static mut COLOR_CACHING: bool = false;
-static mut VERBOSITY: usize = 0;
 
 macro_rules! vprintln {
     ($fmt:expr) => { if verbosity(1) { println!($fmt) } };
@@ -44,39 +34,24 @@ macro_rules! vvprintln {
 }
 
 fn main() {
-    let params = get_parameters();
-    let source_image_path = params.value_of("INPUT").unwrap();
-    let library_dir_path = params.value_of("LIBRARY").unwrap();
-    let out_file_path = params.value_of("OUT_FILE").unwrap();
-    if params.is_present("print-timings") {
-        unsafe {
-            PRINT_TIMING = true;
-        }
-    }
-    if params.is_present("color-caching") {
-        unsafe {
-            COLOR_CACHING = true;
-        }
-    }
-    let verbosity_level = params.occurrences_of("verbose") as usize;
-    unsafe {
-        VERBOSITY = verbosity_level;
-    }
-    let pixel_group_size = params
-        .value_of("SIZE")
-        .unwrap_or(DEFAULT_PIXEL_GROUP_SIZE)
-        .parse::<u32>()
-        .expect("Invalid value for SIZE");
-    let magnification_factor = params
-        .value_of("MAGNIFICATION_FACTOR")
-        .unwrap_or(DEFAULT_MAGNIFICATION)
-        .parse::<u32>()
-        .expect("Invalid value for MAGNIFICATION_FACTOR");
-    let threads = params
-        .value_of("THREADS")
-        .unwrap_or(DEFAULT_THREADS)
-        .parse::<usize>()
-        .expect("Invalid value for THREADS");
+    let (
+        source_image_path,
+        library_dir_path,
+        out_file_path,
+        print_timings_config,
+        color_caching_config,
+        verbosity_config,
+        pixel_group_size,
+        magnification_factor,
+        threads,
+    ) = parameters();
+    set_print_timings(print_timings_config);
+    set_color_caching(color_caching_config);
+    set_verbosity(verbosity_config);
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build_global()
+        .unwrap();
 
     vprintln!("Using magnification: {}", magnification_factor);
     vprintln!("Using pixel group size: {}", pixel_group_size);
@@ -92,12 +67,7 @@ fn main() {
         }
     );
 
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .build_global()
-        .unwrap();
-
-    let source_image = image::open(source_image_path)
+    let source_image = image::open(&source_image_path)
         .expect(&format!("Error reading source image {}", source_image_path));
     let library = load_library(library_dir_path.to_string());
     let closest_image = |(r, g, b): (u8, u8, u8)| -> &PathBuf {
@@ -195,10 +165,10 @@ fn main() {
         for x in 0..(pixel_group_size * magnification_factor) {
             for y in 0..(pixel_group_size * magnification_factor) {
                 pixels.push((
-                        (x_region * pixel_group_size * magnification_factor) + x,
-                        (y_region * pixel_group_size * magnification_factor) + y,
-                        source_image.get_pixel(x, y),
-                        ));
+                    (x_region * pixel_group_size * magnification_factor) + x,
+                    (y_region * pixel_group_size * magnification_factor) + y,
+                    source_image.get_pixel(x, y),
+                ));
             }
         }
         let mut result_image = result_image.lock().unwrap();
@@ -215,8 +185,10 @@ fn main() {
                 "=".repeat(bar),
                 " ".repeat(PROGRESS_SECTIONS - bar),
                 100 * *p / total_regions
-                );
-            std::io::stdout().flush().expect("Something went wrong while writing to STDOUT");
+            );
+            std::io::stdout()
+                .flush()
+                .expect("Something went wrong while writing to STDOUT");
         }
     });
     println!("");
@@ -225,7 +197,7 @@ fn main() {
     result_image
         .lock()
         .unwrap()
-        .save(out_file_path)
+        .save(&out_file_path)
         .expect("Failed to save result image");
     stop_timer(timer, "Image write time: ");
     println!("Wrote {}", out_file_path);
@@ -311,85 +283,6 @@ fn average_color(pixels: Vec<&image::Rgb<u8>>) -> (u8, u8, u8) {
     )
 }
 
-fn get_parameters() -> clap::ArgMatches<'static> {
-    App::new("Rust photomosaic builder")
-        .version("0.1.0")
-        .author("Isaac Post <post.isaac@gmail.com>")
-        .about("Makes photomosaics")
-        .arg(
-            Arg::with_name("INPUT")
-            .help("Sets the input file which will be recreated as a mosaic")
-            .required(true)
-            .index(1),
-            )
-        .arg(
-            Arg::with_name("LIBRARY")
-            .help("The directory containing the images to be used as mosaic tiles")
-            .required(true)
-            .index(2),
-            )
-        .arg(
-            Arg::with_name("OUT_FILE")
-            .help("The name of the output mosaic image")
-            .required(true)
-            .index(3),
-            )
-        .arg(
-            Arg::with_name("color-caching")
-            .short("c")
-            .long("color-caching")
-            .help("Enables caching of closest-color matches. May improve performance if the input image has many identical colors repeated and/or you have a large image library."),
-            )
-        .arg(
-            Arg::with_name("verbose")
-            .short("v")
-            .long("verbose")
-            .multiple(true)
-            .help("Sets the level of verbosity"),
-            )
-        .arg(
-            Arg::with_name("print-timings")
-            .short("t")
-            .long("print-timings")
-            .help("Print timings"),
-            )
-        .arg(
-            Arg::with_name("SIZE")
-            .short("g")
-            .long("pixel-group-size")
-            .help(&format!("The integer size of the square regions, in pixels, which will be replaced in the source image. Defaults to {}", DEFAULT_PIXEL_GROUP_SIZE))
-            .takes_value(true)
-            .required(false),
-            )
-        .arg(
-            Arg::with_name("MAGNIFICATION_FACTOR")
-            .short("m")
-            .long("magnification")
-            .help(&format!("The integer factor by which the original image's dimensions are increased. Defaults to {}", DEFAULT_MAGNIFICATION))
-            .takes_value(true)
-            .required(false),
-            )
-        .arg(
-            Arg::with_name("THREADS")
-            .long("threads")
-            .help(&format!("The number of threads used. Defaults to {}", DEFAULT_THREADS))
-            .takes_value(true)
-            .required(false),
-            )
-        .get_matches()
-}
-
-fn start_timer() -> time::PreciseTime {
-    PreciseTime::now()
-}
-
-fn stop_timer(timer: time::PreciseTime, message: &str) {
-    if unsafe { PRINT_TIMING } {
-        let duration = timer.to(PreciseTime::now()).num_milliseconds();
-        println!("{}{}ms", message, duration);
-    }
-}
-
 fn sub_image_pixels(
     img: &image::ImageBuffer<image::Rgb<u8>, std::vec::Vec<u8>>,
     x: u32,
@@ -404,12 +297,4 @@ fn sub_image_pixels(
         }
     }
     rgbs
-}
-
-fn color_caching() -> bool {
-    unsafe { COLOR_CACHING }
-}
-
-fn verbosity(v_level: usize) -> bool {
-    unsafe { VERBOSITY >= v_level }
 }
